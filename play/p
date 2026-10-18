@@ -1,0 +1,220 @@
+#!/usr/bin/env bash
+
+# -fflags nobuffer: no demux buffering → lowest latency, more jitter risk
+# -flags low_delay: minimize codec reordering/buffering → lower latency, possible quality hit
+# -probesize 32: tiny format probe → fast start, misdetect risk (safe if -f wav)
+# -analyzeduration 0: skip stream analysis → instant start, less accurate timing
+# net: ultra-low latency pipeline; trade stability/accuracy for speed (best for live + known formats)
+# if -fflags nobuffer is dropped, -probesize 32 and -analyzeduration 0 should be dropped or raised... for now i i drop nobuffer ill drop both of the others as well
+
+
+# -hide_banner  \
+# 	-loglevel error  \
+# 	-nostats  \
+# 	-f alsa  \
+# 	-i kiyo  \
+# 	-ac 2 \
+# 	-ar 48000 \
+# 	-sample_fmt s16 \
+# 		-y \
+# 		out.wav
+
+
+
+# -fflags nobuffer -flags low_delay -probesize 32 -analyzeduration 0
+
+
+# capture_audio(){
+#   capture logic here
+# }
+
+# process_audio(){
+#   process logic here
+# }
+
+# start_asr_pipeline{}{
+#   do asr here
+# }
+
+# handle_input(){
+#   input logic here... probabaly wtype
+# }
+
+
+# capture_audio | process_audio | start_asr_pipeline | handle_input
+
+# # -------- DIRECT PIPE (process substitution) --------
+# # capture (48k, stereo) -> preprocess/resample (16k, mono) -> tee(raw.wav)
+# # -> filters -> tee(processed.wav) -> ASR (stdin)
+
+# ffmpeg -hide_banner -loglevel error -nostats \
+#   -fflags nobuffer -flags low_delay -probesize 32 -analyzeduration 0 \
+#   -f alsa -i kiyo \
+#   -ac 2 -ar 48000 -sample_fmt s16 -f wav - \
+# | tee >(cat > raw.wav) \
+# | ffmpeg -hide_banner -loglevel error -nostats \
+#     -fflags nobuffer -flags low_delay -probesize 32 -analyzeduration 0 \
+#     -f wav -i - \
+#     -af "highpass=f=80,lowpass=f=7600,afftdn" \
+#     -ac 1 -ar 16000 -sample_fmt s16 -f wav - \
+# | tee >(cat > processed.wav) \
+# | your_asr_binary --input -
+
+
+
+# -------- NAMED PIPES (FIFO) --------
+# set -euo pipefail
+# RAW_PIPE=$(mktemp -u /tmp/raw.XXXX.pipe)
+# PROC_PIPE=$(mktemp -u /tmp/proc.XXXX.pipe)
+# mkfifo "$RAW_PIPE" "$PROC_PIPE"
+
+# # 1) Capture -> preprocess (16k mono) -> RAW_PIPE
+# ffmpeg -hide_banner -loglevel error -nostats \
+#   -fflags nobuffer -flags low_delay -probesize 32 -analyzeduration 0 \
+#   -f alsa -i kiyo \
+#   -ac 2 -ar 48000 -sample_fmt s16 \
+#   -f wav "$RAW_PIPE" &
+
+# # 2) Tee RAW_PIPE to raw.wav and into filters -> PROC_PIPE
+# tee raw.wav < "$RAW_PIPE" \
+# | ffmpeg -hide_banner -loglevel error -nostats \
+#     -fflags nobuffer -flags low_delay -probesize 32 -analyzeduration 0 \
+#     -f wav -i - \
+#     -af "highpass=f=80,lowpass=f=7600,afftdn" \
+#     -ac 1 -ar 16000 -sample_fmt s16 \
+#     -f wav "$PROC_PIPE" &
+
+# # 3) Tee PROC_PIPE to processed.wav and into ASR
+# tee processed.wav < "$PROC_PIPE" | your_asr_binary --input -
+
+# wait
+# rm -f "$RAW_PIPE" "$PROC_PIPE"
+
+SAVE_RAW=true
+SAVE_PROCESSED=true
+
+
+set -euo pipefail
+
+COMMON_FFMPEG_FLAGS=(
+  -hide_banner -loglevel error -nostats
+  -fflags nobuffer -flags low_delay -probesize 32 -analyzeduration 0
+)
+
+capture_audio() {
+  local input="${1:-}"
+
+  # If arg exists AND is a readable file → decode file
+  if [[ -n "$input" && -f "$input" && -r "$input" ]]; then
+    ffmpeg "${COMMON_FFMPEG_FLAGS[@]}" \
+      -i "$input" \
+      -f wav -
+  else
+    # Fallback: live capture
+    ffmpeg "${COMMON_FFMPEG_FLAGS[@]}" \
+      -f alsa -i kiyo \
+      -ac 2 -ar 48000 -sample_fmt s16 \
+      -f wav -
+  fi
+}
+
+process_audio() {
+  # reads WAV from stdin, writes WAV to stdout
+  ffmpeg "${COMMON_FFMPEG_FLAGS[@]}" \
+    -f wav -i - \
+    -af "highpass=f=80,lowpass=f=7600,afftdn" \
+    -ac 1 -ar 16000 -sample_fmt s16 \
+    -f wav -
+}
+
+asr_pipeline() {
+  # replace with your ASR
+  your_asr_binary --input -
+}
+
+handle_input() {
+  # example: pipe ASR text into wtype
+  wtype -
+}
+
+main() {
+  capture_audio \
+  | tee >(cat > raw.wav) \
+  | process_audio \
+  | tee >(cat > processed.wav) \
+  | asr_pipeline \
+  | handle_input
+}
+
+main "$@"
+
+
+
+#!/usr/bin/env bash
+set -euo pipefail
+
+SAVE_RAW=${SAVE_RAW:-true}
+SAVE_PROCESSED=${SAVE_PROCESSED:-true}
+
+
+
+COMMON_FFMPEG_FLAGS=(
+  -hide_banner -loglevel error -nostats
+  -fflags nobuffer -flags low_delay -probesize 32 -analyzeduration 0
+)
+
+capture_audio() {
+  local input="${1:-}"
+
+  if [[ -n "$input" && -f "$input" && -r "$input" ]]; then
+    ffmpeg "${COMMON_FFMPEG_FLAGS[@]}" \
+      -i "$input" \
+      -f wav -
+  else
+    ffmpeg "${COMMON_FFMPEG_FLAGS[@]}" \
+      -f alsa -i kiyo \
+      -ac 2 -ar 48000 -sample_fmt s16 \
+      -f wav -
+  fi
+}
+
+process_audio() {
+  ffmpeg "${COMMON_FFMPEG_FLAGS[@]}" \
+    -f wav -i - \
+    -af "highpass=f=80,lowpass=f=7600,afftdn" \
+    -ac 1 -ar 16000 -sample_fmt s16 \
+    -f wav -
+}
+
+maybe_save() {
+  local enabled="$1"
+  local outfile="$2"
+
+  if [[ "$enabled" == "true" ]]; then
+    tee >(cat > "$outfile")
+  else
+    cat
+  fi
+}
+
+asr_pipeline() {
+  your_asr_binary --input -
+}
+
+handle_input() {
+  wtype -
+}
+
+
+
+
+main() {
+  capture_audio "$@" \
+  | maybe_save "$SAVE_RAW" raw.wav \
+  | process_audio \
+  | maybe_save "$SAVE_PROCESSED" processed.wav \
+  | asr_pipeline \
+  | handle_input
+}
+
+main "$@"

@@ -1,0 +1,13 @@
+#!/usr/bin/env bash
+set -euo pipefail
+repo_dir=$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")/.." && pwd)
+python_bin=${TITSDIC_PYTHON:-"$repo_dir/.venv-phonon/bin/python"}
+if [[ -z ${TITSDIC_PYTHON:-} && ! -x $python_bin ]]; then
+    python_bin=$repo_dir/build/asr-compare/env-phonon/bin/python
+fi
+if [[ ! -x "$python_bin" ]]; then
+    printf 'Dictation environment not found: %s\nRun bash install.sh first, or set TITSDIC_PYTHON.\n' "$python_bin" >&2
+    exit 1
+fi
+export CUDA_VISIBLE_DEVICES='' FERMION_DEVICE=cpu OMP_WAIT_POLICY=PASSIVE
+exec "$python_bin" "$repo_dir/dictation.py" listen "$@"

@@ -1,0 +1,89 @@
+# Private configuration and credentials
+.env
+.env.*
+!.env.example
+*.env
+*.env.*
+.ssh/
+secrets/
+*.pem
+*.key
+*.ign
+*.aign
+ign/
+
+# Python environments, caches, and generated files
+__pycache__/
+*.py[oc]
+.venv
+.venv*/
+venv/
+.pytest_cache/
+.ruff_cache/
+build/
+dist/
+wheels/
+*.egg-info/
+
+# Downloaded model code and weights
+whisper.cpp/
+models/
+convert_models/
+fast-whisper/
+pywhispercpp*/
+*.bin
+*.gguf
+*.safetensors
+*.onnx
+*.pt
+*.pth
+
+# Datasets, recordings, transcripts, and benchmark output stay local.
+/data/
+/tst/data/*
+!/tst/data/scripts/
+!/tst/data/README.md
+*.log
+*.jsonl
+/all_three.txt
+*.tar
+*.tar.gz
+*.tgz
+*.zip
+*.wav
+*.flac
+*.mp3
+*.m4a
+*.ogg
+*.mp4
+*.webm
+# These two short generated cues are application assets, not recordings.
+!/res/sound-test/start.wav
+!/res/sound-test/end.wav
+
+# Editor state and machine-specific configuration
+.vscode/
+.idea/
+*.code-workspace
+.DS_Store
+Thumbs.db
+/hot_mic/
+
+# Local research notes, captured sessions, and scratch output
+/notes.md
+/todo.md
+/whisper-args.md
+/plan-research/
+/typing/
+/res/*.md
+/tst/*.md
+!/tst/README.md
+/src/h
+
+# JavaScript dependencies and generated output
+node_modules/
+.svelte-kit/
+.output/
+.vercel/
+.netlify/
+.wrangler/

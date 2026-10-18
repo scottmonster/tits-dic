@@ -1,0 +1,28 @@
+[build-system]
+requires = ["setuptools>=69"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "tits-dic"
+version = "0.1.0"
+description = "Tell It Something Dictation"
+readme = "README.md"
+requires-python = ">=3.13"
+dependencies = [
+	"contractions>=0.1.73",
+	"jiwer>=3.0.5",
+	"PyYAML>=6.0",
+  "pywhispercpp"
+]
+
+[project.scripts]
+titsdic = "titsdic.main:main"
+
+[tool.setuptools]
+package-dir = {"" = "src"}
+
+[tool.setuptools.packages.find]
+where = ["src"]
+
+[tool.uv.sources]
+pywhispercpp = { path = "pywhispercpp-work", editable = true }

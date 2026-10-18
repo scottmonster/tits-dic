@@ -1,0 +1,377 @@
+#!/usr/bin/env bash
+
+
+
+project_root="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+wdir="${project_root}/whisper.cpp"
+mdir="${project_root}/models/ggml"
+config_file="${project_root}/tits-dic.toml"
+config_file_explicit=false
+
+beam_size=5
+max_tokens=256
+min_ctx=50
+suppress_blank=false
+suppress_nst=false
+audio_ctx=317
+language=en
+min_audio_ctx=160
+# max_audio_ctx=1500
+max_audio_ctx=1500
+backend=cpu
+wbin="${wdir}/build-${backend}/bin"
+wcli="${wbin}/whisper-cli"
+
+cli_input=
+cli_backend=
+cli_model=
+
+normalize_backend() {
+  local raw_backend="$1"
+
+  case "$raw_backend" in
+    ""|none|cpu)
+      echo "cpu"
+      ;;
+    blas|openblas)
+      echo "openblas"
+      ;;
+    gpu|nvidia|cuda)
+      echo "cuda"
+      ;;
+    *)
+      echo "$raw_backend"
+      ;;
+  esac
+}
+
+print_usage() {
+  cat <<EOF
+usage: $(basename "$0") [options] [key=value ...]
+
+Options:
+  --input,   -i PATH      Input WAV path
+  --backend, -b NAME      Backend preset: cpu, blas/openblas, cuda
+  --model,   -m NAME      Model name or path
+  --config,  -c PATH      Config file path
+  --help,    -h           Show this help
+
+CLI values override values loaded from the config file.
+EOF
+}
+
+die() {
+  echo "[ERROR] $*" >&2
+  exit 1
+}
+
+set_backend() {
+  backend="$(normalize_backend "$1")"
+  wbin="${wdir}/build-${backend}/bin"
+  wcli="${wbin}/whisper-cli"
+}
+
+resolve_model_path() {
+  local raw_model="$1"
+  local target
+
+  if [[ -e "$raw_model" ]]; then
+    printf '%s\n' "$raw_model"
+    return 0
+  fi
+
+  target="${mdir}/${raw_model}.bin"
+  if [[ -e "$target" ]]; then
+    printf '%s\n' "$target"
+    return 0
+  fi
+
+  target="${mdir}/${raw_model}"
+  if [[ -e "$target" ]]; then
+    printf '%s\n' "$target"
+    return 0
+  fi
+
+  return 1
+}
+
+set_model() {
+  local raw_model="$1"
+  local target
+
+  if target="$(resolve_model_path "$raw_model")"; then
+    model="$target"
+    return 0
+  fi
+
+  die "missing model: ${raw_model}"
+}
+
+apply_config_value() {
+  local key="$1"
+  local value="$2"
+
+  case "$key" in
+    backend)
+      set_backend "$value"
+      ;;
+    model)
+      set_model "$value"
+      ;;
+    input|beam_size|max_tokens|min_ctx|suppress_blank|suppress_nst|language)
+      printf -v "$key" '%s' "$value"
+      ;;
+  esac
+}
+
+parse_args() {
+  local key
+  local value
+
+  while [[ $# -gt 0 ]]; do
+    case "$1" in
+      --input|-i)
+        [[ $# -ge 2 ]] || die "missing value for $1"
+        cli_input="$2"
+        shift 2
+        ;;
+      --backend|-b)
+        [[ $# -ge 2 ]] || die "missing value for $1"
+        cli_backend="$2"
+        shift 2
+        ;;
+      --model|-m)
+        [[ $# -ge 2 ]] || die "missing value for $1"
+        cli_model="$2"
+        shift 2
+        ;;
+      --config|-c)
+        [[ $# -ge 2 ]] || die "missing value for $1"
+        config_file="$2"
+        config_file_explicit=true
+        shift 2
+        ;;
+      --help|-h)
+        print_usage
+        exit 0
+        ;;
+      *=*)
+        key="${1%%=*}"
+        value="${1#*=}"
+        case "$key" in
+          input)
+            cli_input="$value"
+            ;;
+          backend)
+            cli_backend="$value"
+            ;;
+          model)
+            cli_model="$value"
+            ;;
+          config)
+            config_file="$value"
+            config_file_explicit=true
+            ;;
+          *)
+            die "unknown argument: $1"
+            ;;
+        esac
+        shift
+        ;;
+      *)
+        die "unknown argument: $1"
+        ;;
+    esac
+  done
+}
+
+compute_audio_ctx() {
+  local wav_path="$1"
+  local min_ctx_value="$2"
+
+  python3 - "$wav_path" "$min_ctx_value" "$min_audio_ctx" "$max_audio_ctx" <<'PY'
+import math
+import sys
+import wave
+
+wav_path = sys.argv[1]
+min_ctx = int(sys.argv[2])
+min_audio_ctx = int(sys.argv[3])
+max_audio_ctx = int(sys.argv[4])
+
+with wave.open(wav_path, "rb") as wav_file:
+    frames = wav_file.getnframes()
+    sample_rate = wav_file.getframerate()
+
+duration_seconds = frames / sample_rate
+audio_ctx = min(max_audio_ctx, max(min_audio_ctx, min_ctx, math.ceil(duration_seconds * 50) + 32))
+print(audio_ctx)
+PY
+}
+
+
+
+parse_toml(){
+  [[ -f "$config_file" ]] || {
+    if [[ "$config_file_explicit" == true ]]; then
+      die "missing config file: ${config_file}"
+    fi
+    return 0
+  }
+
+  while IFS= read -r line; do
+    [[ -z "$line" || "$line" =~ ^[[:space:]]*# ]] && continue
+    [[ "$line" =~ ^[[:space:]]*\[ ]] && continue
+
+    if [[ "$line" =~ ^[[:space:]]*([A-Za-z_][A-Za-z0-9_]*)[[:space:]]*=[[:space:]]*(.+)[[:space:]]*$ ]]; then
+      key=${BASH_REMATCH[1]}
+      value=${BASH_REMATCH[2]}
+      value=${value%%#*}
+      value=${value%"${value##*[![:space:]]}"}
+      value=${value#"${value%%[![:space:]]*}"}
+
+      if [[ "$value" =~ ^\"(.*)\"$ ]]; then
+        value=${BASH_REMATCH[1]}
+      fi
+
+      apply_config_value "$key" "$value"
+
+      # printf '%s: %s\n' "$key" "$value"
+    fi
+  
+  done < "$config_file"
+
+}
+
+
+apply_cli_overrides() {
+  [[ -n "$cli_input" ]] && apply_config_value input "$cli_input"
+  [[ -n "$cli_backend" ]] && apply_config_value backend "$cli_backend"
+  [[ -n "$cli_model" ]] && apply_config_value model "$cli_model"
+}
+
+
+validate_config() {
+  [[ -n "$input" ]] || die "missing input"
+  [[ -e "$input" ]] || die "missing input file: ${input}"
+  [[ -n "$model" ]] || die "missing model"
+  [[ -x "$wcli" ]] || die "missing whisper binary: ${wcli}"
+}
+
+
+finalize_config() {
+  audio_ctx="$(compute_audio_ctx "$input" "$min_ctx")"
+}
+
+
+build_whisper_command() {
+  local output_name="$1"
+  local include_audio_ctx="$2"
+  local -n output_cmd="$output_name"
+  local model_name
+
+  model_name="$(basename "$model")"
+
+  output_cmd=(
+    "$wcli"
+    "--model" "$model"
+    "--file" "$input"
+    "--beam-size" "$beam_size"
+    "--max-tokens" "$max_tokens"
+    "--no-timestamps"
+    # "--no-prints"
+    "--no-fallback"
+    # "--language" "$language"
+    "--print-confidence"
+    "--print-colors"
+
+  )
+
+  if [[ "$suppress_blank" == true ]]; then
+    output_cmd+=("--suppress-blank")
+  else
+    output_cmd+=("--no-suppress-blank")
+  fi
+
+  if [[ "$suppress_nst" == true ]]; then
+    output_cmd+=("--suppress-nst")
+  fi
+
+  if [[ "$model_name" == acft.* && "$include_audio_ctx" == true ]]; then
+    output_cmd+=("--audio-ctx" "$audio_ctx")
+  fi
+}
+
+
+display_command() {
+  local rendered
+
+  printf -v rendered '%q ' "$@"
+  rendered="${rendered% }"
+  rendered="${rendered//"$project_root"/.}"
+  printf '%s\n' "$rendered"
+}
+
+
+run_whisper_command() {
+  local include_audio_ctx="$1"
+  local variant_label="$2"
+  local -a cmd
+  local start_time
+  local start_label
+  local end_time
+  local end_label
+  local total_runtime
+  local display_cmd
+
+  build_whisper_command cmd "$include_audio_ctx"
+  display_cmd="$(display_command "${cmd[@]}")"
+  start_time=$EPOCHREALTIME
+  start_label=$(date '+%Y-%m-%d %H:%M:%S')
+  printf 'calling: %s\n' "$display_cmd"
+  "${cmd[@]}"
+  echo
+
+  end_time=$EPOCHREALTIME
+  end_label=$(date '+%Y-%m-%d %H:%M:%S')
+  total_runtime=$(awk "BEGIN {printf \"%.3f\", $end_time - $start_time}")
+  
+
+  [[ -n "$variant_label" ]] && printf 'variant: %s\n' "$variant_label"
+  printf 'start: %s\n' "$start_label"
+  printf 'end: %s\n' "$end_label"
+  printf 'total runtime: %s seconds\n' "$total_runtime"
+  printf 'complete: %s\n' "$display_cmd"
+}
+
+
+run_whisper_commands() {
+  local model_name
+
+  model_name="$(basename "$model")"
+
+  if [[ "$model_name" == acft.* ]]; then
+    run_whisper_command true "with-audio-ctx"
+    printf '\n===== without-audio-ctx =====\n\n'
+    run_whisper_command false "without-audio-ctx"
+    return
+  fi
+
+  run_whisper_command false ""
+}
+
+
+parse_args "$@"
+parse_toml
+apply_cli_overrides
+validate_config
+finalize_config
+
+
+
+run_whisper_commands
+
+# ffmpeg capture | tee >(raw.wav) | ffmpeg filters | tee >(processed.wav) | ASR pipeline
+
+
+

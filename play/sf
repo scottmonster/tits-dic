@@ -1,0 +1,231 @@
+#!/usr/bin/env bash
+
+set -euo pipefail
+
+
+file="/home/scott/Documents/tits-dic/tst/short.wav"
+file="/home/scott/Documents/tits-dic/tst/0000WEIRD.wav"
+model="/home/scott/Documents/tits-dic/models/ggml/tiny.en.q5.bin"
+capture_id="${CAPTURE_ID:-4}"
+sdl_audio_driver="${SDL_AUDIODRIVER:-}"
+# plughw:Loopback,0,0 -> WRITE (playback device)
+# plughw:Loopback,1,0 -> READ  (paired capture side)
+loopback_write="${LOOPBACK_WRITE:-plughw:Loopback,0,0}"
+loopback_read="${LOOPBACK_READ:-plughw:Loopback,1,0}"
+stream_bin="/home/scott/Documents/tits-dic/whisper.cpp/build-cpu/bin/whisper-stream"
+
+basic_args=(
+  -hide_banner -loglevel error -nostats
+)
+fast_args=(
+  -fflags nobuffer -flags low_delay -probesize 32 -analyzeduration 0
+) 
+
+if [[ -z "$sdl_audio_driver" && "$loopback_write" == *Loopback* ]]; then
+  sdl_audio_driver="alsa"
+fi
+
+ensure_loopback() {
+  local module_load_file="/etc/modules-load.d/aloop.conf"
+  local modprobe_file="/etc/modprobe.d/aloop.conf"
+  local module_load_contents="snd-aloop"
+  local modprobe_contents="options snd-aloop index=10 pcm_substreams=2"
+  local needs_reload=0
+  
+
+  if ! sudo test -f "$module_load_file" || [[ "$(sudo cat "$module_load_file" 2>/dev/null || true)" != "$module_load_contents" ]]; then
+    echo "[+] Writing module auto-load config..." >&2
+    printf '%s\n' "$module_load_contents" | sudo tee "$module_load_file" >/dev/null
+    needs_reload=1
+  fi
+
+  if ! sudo test -f "$modprobe_file" || [[ "$(sudo cat "$modprobe_file" 2>/dev/null || true)" != "$modprobe_contents" ]]; then
+    echo "[+] Writing module options..." >&2
+    printf '%s\n' "$modprobe_contents" | sudo tee "$modprobe_file" >/dev/null
+    needs_reload=1
+  fi
+
+  if aplay -l | grep -q 'Loopback'; then
+    if (( needs_reload == 0 )); then
+      return 0
+    fi
+  else
+    needs_reload=1
+  fi
+
+  echo "[+] Reloading module..." >&2
+  sudo modprobe -r snd-aloop 2>/dev/null || true
+  sudo modprobe snd-aloop
+
+  echo "[+] Verifying..." >&2
+  if aplay -l | grep -qi 'Loopback'; then
+    return 0
+  fi
+
+  echo "[!] Loopback device not found" >&2
+  return 1
+}
+
+detect_capture_id() {
+  local listing
+  local loopback_match_index=1
+
+  if [[ "$sdl_audio_driver" == "alsa" && "$loopback_read" =~ ^(plug)?hw:Loopback,([0-9]+)(,([0-9]+))?$ ]]; then
+    loopback_match_index=$((BASH_REMATCH[2] + 1))
+  fi
+
+  if [[ -n "$sdl_audio_driver" ]]; then
+    listing="$(SDL_AUDIODRIVER="$sdl_audio_driver" "$stream_bin" -m /tmp/does-not-exist 2>&1 || true)"
+  else
+    listing="$("$stream_bin" -m /tmp/does-not-exist 2>&1 || true)"
+  fi
+  listing="$(sed -n "s/^[^:]*:    - Capture device #\([0-9]\+\): '\(.*\)'$/\1|\2/p" <<< "$listing")"
+  awk -F'|' -v target="$loopback_match_index" '
+    tolower($2) ~ /loopback/ {
+      count++
+      if (count == target) {
+        print $1
+        exit
+      }
+    }
+  ' <<< "$listing"
+}
+
+# if [[ "$loopback_write" == "plughw:Loopback,0,0" ]]; then
+#   if ! ensure_loopback; then
+#     echo "Failed to load ALSA Loopback card. Set LOOPBACK_WRITE to a valid playback device or load snd-aloop first." >&2
+#     exit 1
+#   fi
+# fi
+
+# if [[ -z "$capture_id" ]]; then
+#   capture_id="$(detect_capture_id)"
+#   if [[ -z "$capture_id" ]]; then
+#     echo "Could not find an SDL capture device matching Loopback. Set CAPTURE_ID manually." >&2
+#     exit 1
+#   fi
+# fi
+
+echo "running: $stream_bin -m $model -c $capture_id"
+echo "SDL_AUDIODRIVER: ${sdl_audio_driver:-auto}"
+echo "loopback write: $loopback_write"
+echo "loopback read:  $loopback_read"
+if [[ -n "$sdl_audio_driver" ]]; then
+  SDL_AUDIODRIVER="$sdl_audio_driver" "$stream_bin" -m "$model" -c "$capture_id" &
+else
+  "$stream_bin" -m "$model" -c "$capture_id" &
+fi
+
+stream_pid=$!
+trap '[[ -n "${stream_pid:-}" ]] && kill "$stream_pid" 2>/dev/null || true' EXIT
+
+
+# sleep 2
+
+
+
+
+ffmpeg "${basic_args[@]}" "${fast_args[@]}" -re -i "$file" \
+  -af "highpass=f=80,lowpass=f=7600,afftdn" \
+  -ac 1 -ar 16000 -sample_fmt s16 \
+  -f alsa "$loopback_write"
+
+
+
+echo "whisper cmd was: $stream_bin -m $model -c $capture_id "
+
+
+# ffmpeg "${basic_args[@]}" "${fast_args[@]}" -re -i "$file" -f wav - \
+# | ffmpeg "${basic_args[@]}" "${fast_args[@]}" -f wav -i - \
+#     -af "highpass=f=80,lowpass=f=7600,afftdn" \
+#     -ac 1 -ar 16000 -sample_fmt s16 \
+#     -f alsa "$loopback_write"
+
+# SDL_AUDIODRIVER=alsa /home/scott/Documents/tits-dic/whisper.cpp/build-cpu/bin/whisper-stream -m /home/scott/Documents/tits-dic/models/ggml/tiny.en.q5.bin 2>&1 | grep Capture
+
+# fuser -v /dev/snd/*
+# fuser -k /dev/snd/*
+
+exit
+
+but i don think i need
+hw:Loopback,0,0  → maps to → hw:Loopback,1,0
+hw:Loopback,0,1  → maps to → hw:Loopback,1,1
+
+
+
+i just need:
+hw:Loopback,0,0
+hw:Loopback,0,1
+
+right?... i think that is part of what my issue was is i was tryingt history
+
+this shows 2 loopback devices and trying to use the device 3 doesnt work but trying to use the device 4 does work
+
+└─$ SDL_AUDIODRIVER=alsa /home/scott/Documents/tits-dic/whisper.cpp/build-cpu/bin/whisper-stream 2>&1 | grep Capture
+init:    - Capture device #0: 'HDA Intel PCH, ALC1220 Analog'
+init:    - Capture device #1: 'HDA Intel PCH, ALC1220 Alt Analog'
+init:    - Capture device #2: 'Razer Kiyo Pro, USB Audio'
+init:    - Capture device #3: 'Loopback, Loopback PCM'
+init:    - Capture device #4: 'Loopback, Loopback PCM (2)'
+
+SDL_AUDIODRIVER=alsa /home/scott/Documents/tits-dic/whisper.cpp/build-cpu/bin/whisper-stream 2>&1 | grep Capture
+/home/scott/Documents/tits-dic/whisper.cpp/build-cpu/bin/whisper-stream 2>&1 | grep '#'
+/home/scott/Documents/tits-dic/whisper.cpp/build-cpu/bin/whisper-stream -m /home/scott/Documents/tits-dic/models/ggml/tiny.en.q5.bin 2>&1 | grep Capture
+SDL_AUDIODRIVER=alsa /home/scott/Documents/tits-dic/whisper.cpp/build-cpu/bin/whisper-stream -m /home/scott/Documents/tits-dic/models/ggml/tiny.en.q5.bin 2>&1 | grep Capture
+
+
+
+card 10: Loopback [Loopback], device 0: Loopback PCM [Loopback PCM]
+  Subdevices: 2/2
+  Subdevice #0: subdevice #0
+  Subdevice #1: subdevice #1
+card 10: Loopback [Loopback], device 1: Loopback PCM [Loopback PCM]
+  Subdevices: 2/2
+  Subdevice #0: subdevice #0
+  Subdevice #1: subdevice #1
+
+
+
+okat this is the part i dont understand....
+
+Pair 0:
+  write → hw:Loopback,0,0 <--- i can write here
+  read  → hw:Loopback,1,0 <--- i can read here
+
+so why is this neded at all
+Pair 1:
+  write → hw:Loopback,0,1
+  read  → hw:Loopback,1,1
+
+
+hotmic
+# 1. Stop user audio stack
+systemctl --user stop pipewire pipewire-pulse wireplumber hotmic
+systemctl --user stop pipewire pipewire-pulse wireplumber --now 
+
+# 2. Verify nothing is using /dev/snd
+fuser -v /dev/snd/*
+
+# 3. Remove loopback
+sudo modprobe -r snd_aloop
+systemctl --user start pipewire pipewire-pulse wireplumber hotmic --now
+
+# 4. (optional) reload it
+sudo modprobe snd_aloop
+
+# 5. Restart audio
+
+
+
+systemctl --user stop pipewire pipewire-pulse wireplumber --now 
+└─$ systemctl --user list-units | rg pipewire
+pipewire.service                          loaded active running   PipeWire Multimedia Service
+pipewire-pulse.socket                     loaded active listening PipeWire PulseAudio
+pipewire.socket                           loaded active running   PipeWire Multimedia System Sockets
+
+
+systemctl --user stop pipewire{,-pulse}.{service,socket} wireplumber.service --now
+sudo modprobe -r snd_aloop
+sudo modprobe snd_aloop
+systemctl --user start pipewire{,-pulse}.{service,socket} wireplumber.service --now

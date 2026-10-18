@@ -1,0 +1,185 @@
+#!/usr/bin/env bash
+
+set -x
+
+file="/home/scott/Documents/tits-dic/tst/short.wav"
+file="/home/scott/Documents/tits-dic/tst/0000WEIRD.wav"
+model="/home/scott/Documents/tits-dic/models/ggml/tiny.en.q5.bin"
+capture_id="${CAPTURE_ID:-}"
+sdl_audio_driver="${SDL_AUDIODRIVER:-}"
+# plughw:Loopback,0,0 -> WRITE 
+# plughw:Loopback,1,0 -> READ  
+loopback_write="${LOOPBACK_WRITE:-plughw:Loopback,0,0}"
+loopback_read="${LOOPBACK_READ:-plughw:Loopback,1,0}"
+stream_bin="/home/scott/Documents/tits-dic/whisper.cpp/build-cpu/bin/whisper-stream"
+
+
+export SDL_AUDIODRIVER=alsa
+# "$stream_bin" | grep -E 'Loopback.*(2)'
+
+
+setup_loopback() {
+  local changed=0
+
+  local load_file="/etc/modules-load.d/aloop.conf"
+  local load_content="snd-aloop"
+
+  local modprobe_file="/etc/modprobe.d/aloop.conf"
+  local modprobe_content="options snd-aloop index=23 pcm_substreams=1"
+
+  [[ $(sudo cat "$load_file" 2>/dev/null) == "$load_content" ]] || {
+    echo "creating load file" >&2
+    echo "$load_content" | sudo tee "$load_file" >/dev/null
+    changed=1
+  }
+
+  [[ $(sudo cat "$modprobe_file" 2>/dev/null) == "$modprobe_content" ]] || {
+    echo "creating module file" >&2
+    echo "$modprobe_content" | sudo tee "$modprobe_file" >/dev/null
+    changed=1
+  }
+
+  ((changed)) && {
+    echo "attempting to load module" >&2
+    # NOTE: before i was trying to stop and start all of the pulse/pipewire services and sudo modprobe -r snd_aloop but the thing is, if we have no loopback device we dont need to do all of that
+    sudo modprobe snd_aloop
+
+    local found_loopback=0
+
+    for _ in {1..30}; do
+      if aplay -l | grep -q 'card 23'; then
+        found_loopback=1
+        break
+      fi
+
+      sleep 0.1
+    done
+
+    if (( ! found_loopback )); then
+      echo "Loopback card 23 did not appear within 3 seconds" >&2
+      return 1
+    fi
+
+  }
+  return 0
+}
+
+get_id() {
+  local id
+
+  _find_id() {
+    export SDL_AUDIODRIVER=alsa
+
+    # i was having issues with everything hanging up here if the loopback device was not found... sometimes it would hang, sometimes it wouldnt - this was my solution
+    # redirect everything to descriptor 69
+    # use stdbuf -oL so it outputs every line and not wait to complete
+    exec 69< <(stdbuf -oL "$stream_bin" -m /nonexistent/booty-hole 2>&1)
+    local pid=$!
+    local res
+
+    # read from 69 and echo every line into res until we know the capture devices have been listed
+    res="$(
+      while IFS= read -r line <&69; do
+        echo "$line"
+        [[ "$line" == *"obtained spec for input device"* || "$line" == *"loading model"* ]] && {
+          kill "$pid" 2>/dev/null
+          break
+        }
+      done
+    )"
+
+    # wait and close
+    wait "$pid" 2>/dev/null
+    exec 69<&-
+
+    # finally match the loopback device... i could probably do this once in the while loop - on match, check rematch, echo once with the match if its the loopback otherwise just kill
+    echo "$res" | grep -oiPm1 '#\K\d+(?=.*loopback.*\(2\))'
+  }
+
+  id="$(_find_id)"
+
+  [[ -z "$id" ]] && {
+    setup_loopback || return 1
+    # echo "call setup_loopback" >&2
+    id="$(_find_id)"
+  }
+
+  [[ -z "$id" ]] && {
+    echo "Failed to find Loopback capture device after loading snd_aloop" >&2
+    return 1
+  }
+
+  printf '%s\n' "$id"
+}
+
+
+loop_id="$(get_id)" || exit 1
+echo "$loop_id"
+
+if [[ -z "$capture_id" ]]; then
+  loop_id="$(get_id)" || exit 1
+  echo "$loop_id"
+  capture_id="$loop_id"
+fi
+
+stream_ops=(
+  -m "$model"
+  -c "$capture_id"
+)
+
+"$stream_bin" "${stream_ops[@]}" &
+stream_pid=$!
+trap '[[ -n "${stream_pid:-}" ]] && kill "$stream_pid" 2>/dev/null || true' EXIT
+
+basic_args=(
+  -hide_banner -loglevel error -nostats
+)
+fast_args=(
+  -fflags nobuffer -flags low_delay -probesize 32 -analyzeduration 0
+) 
+
+# ffmpeg "${basic_args[@]}" "${fast_args[@]}" -re -i "$file" \
+#   -af "highpass=f=80,lowpass=f=7600,afftdn" \
+#   -ac 1 -ar 16000 -sample_fmt s16 \
+#   -f alsa "$loopback_write"
+
+ffmpeg "${basic_args[@]}" "${fast_args[@]}" -re -i "$file" \
+  -ac 1 -ar 16000 -sample_fmt s16 \
+  -f alsa "$loopback_write"
+
+
+exit
+
+
+exit
+
+
+
+
+
+
+# echo "options snd-aloop index=10 pcm_substreams=1" | sudo tee "/etc/modprobe.d/aloop.conf"
+# echo "snd-aloop" | sudo tee "/etc/modules-load.d/aloop.conf"
+# sudo modprobe snd-aloop
+
+
+
+
+# rg -P '(?<=#)\d'
+# rg -P '(?<=#)\d(?:.*(?<=Loopback).*\(2\))'
+
+
+fuser -v /dev/snd/*
+
+cat /etc/modules-load.d/aloop.conf && sudo rm /etc/modules-load.d/aloop.conf
+cat /etc/modprobe.d/aloop.conf && sudo rm /etc/modprobe.d/aloop.conf
+systemctl --user stop pipewire{,-pulse}.{service,socket} wireplumber.service --now
+sudo modprobe -r snd_aloop
+systemctl --user start pipewire{,-pulse}.{service,socket} wireplumber.service --now
+aplay -l
+
+# restart
+systemctl --user stop pipewire{,-pulse}.{service,socket} wireplumber.service --now
+sudo modprobe -r snd_aloop
+sudo modprobe snd_aloop
+systemctl --user start pipewire{,-pulse}.{service,socket} wireplumber.service --now

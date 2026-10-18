@@ -1,0 +1,56 @@
+#!/usr/bin/env bash
+
+set -x
+
+
+
+# systemctl --user stop pipewire.service --now
+# systemctl --user stop pipewire.socket --now
+# systemctl --user stop pipewire-pulse.service --now
+# systemctl --user stop pipewire-pulse.socket --now
+# systemctl --user stop wireplumber.service --now
+
+
+# timeout -k 1s 2s systemctl --user stop pipewire-pulse.service
+# timeout -k 1s 2s systemctl --user stop wireplumber.service
+# timeout -k 1s 2s systemctl --user stop pipewire.service
+# timeout -k 1s 2s systemctl --user stop pipewire-pulse.socket pipewire.socket
+
+# systemctl --user mask pipewire.service pipewire-pulse.service wireplumber.service
+# systemctl --user mask pipewire.socket pipewire-pulse.socket
+timeout -k 1s 2s  systemctl --user mask pipewire.service pipewire-pulse.service wireplumber.service pipewire.socket pipewire-pulse.socket
+timeout -k 1s 2s  systemctl --user stop pipewire.service pipewire-pulse.service wireplumber.service pipewire.socket pipewire-pulse.socket
+fuser -k /dev/snd/*
+# systemctl --user stop pipewire-pulse.service wireplumber.service pipewire.service
+# systemctl --user stop pipewire-pulse.socket pipewire.socket
+# systemctl --user reset-failed
+# fuser -k /dev/snd/*
+# fuser -k /dev/snd/*
+# systemctl --user mask pipewire.service pipewire-pulse.service wireplumber.service
+# systemctl --user mask pipewire.socket pipewire-pulse.socket
+
+aplay -l
+# fuser -v /dev/snd/*
+cat /etc/modules-load.d/aloop.conf && sudo rm /etc/modules-load.d/aloop.conf
+cat /etc/modprobe.d/aloop.conf && sudo rm /etc/modprobe.d/aloop.conf
+
+fuser -k /dev/snd/*
+sudo modprobe -r snd_aloop
+
+
+
+
+# timeout -k 1s 2s systemctl --user start pipewire.socket pipewire-pulse.socket
+# timeout -k 1s 2s systemctl --user start pipewire.service 
+# timeout -k 1s 2s systemctl --user start pipewire-pulse.service 
+# timeout -k 1s 2s systemctl --user start wireplumber.service 
+
+# systemctl --user unmask pipewire.service pipewire-pulse.service wireplumber.service
+# systemctl --user unmask pipewire.socket pipewire-pulse.socket
+
+timeout -k 1s 2s systemctl --user unmask pipewire.socket pipewire-pulse.socket pipewire.service pipewire-pulse.service wireplumber.service 
+timeout -k 1s 2s systemctl --user start pipewire.socket pipewire-pulse.socket pipewire.service pipewire-pulse.service wireplumber.service 
+
+
+
+aplay -l

@@ -282,7 +282,7 @@ python3 scripts/check-publication.py --staged
 git diff --cached --stat
 # After reviewing and committing:
 python3 scripts/check-publication.py HEAD
-git push -u origin main
+git push -u origin master
 ```
 
 `python3 scripts/check-publication.py --install-hook` installs a local pre-push
@@ -290,7 +290,7 @@ check. It rejects excluded files, files over 10 MiB, recognized credential
 patterns, and branches named `local-only/*`. The checks cover the complete
 history being pushed. They supplement reviewing changes; they do not guarantee
 that arbitrary text contains no private information. Local backup branches must
-stay local; push `main` explicitly rather than using `--all` or `--mirror`.
+stay local; push `master` explicitly rather than using `--all` or `--mirror`.
 
 ## Held-key dictation with sound timing
 

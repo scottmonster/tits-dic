@@ -14,7 +14,7 @@ class PublicationTests(unittest.TestCase):
         self.temp = tempfile.TemporaryDirectory(prefix='titsdic-publication-test-')
         self.addCleanup(self.temp.cleanup)
         self.repo = Path(self.temp.name)
-        self.git('init', '-b', 'main')
+        self.git('init', '-b', 'master')
         (self.repo / '.gitignore').write_text('.env\n*.log\n/data/\n')
         (self.repo / 'app.py').write_text('print("example")\n')
         self.git('add', '.')
@@ -72,7 +72,7 @@ class PublicationTests(unittest.TestCase):
         oid = self.git('rev-parse', 'HEAD').stdout.strip()
         zero = '0' * 40
         result = subprocess.run([str(hook)], cwd=self.repo,
-                                input=f'refs/heads/main {oid} refs/heads/main {zero}\n',
+                                input=f'refs/heads/master {oid} refs/heads/master {zero}\n',
                                 capture_output=True, text=True, timeout=10)
         self.assertEqual(result.returncode, 0, result.stderr)
         self.check('--pre-push', expected=1,

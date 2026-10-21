@@ -68,6 +68,8 @@ pywhispercpp*/
 .DS_Store
 Thumbs.db
 /hot_mic/
+/.titsdic-completions.json
+/.titsdic-completions.json.tmp
 
 # Local research notes, captured sessions, and scratch output
 /notes.md

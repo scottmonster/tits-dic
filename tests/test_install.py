@@ -92,7 +92,9 @@ class InstallTests(unittest.TestCase):
         self.checkout.mkdir()
         for file in ('install.sh', 'requirements-dictation.txt', '.gitignore',
                      'bin/tap-to-talk.sh', 'bin/ptt.sh', 'bin/hold-to-talk.sh', 'bin/dictate',
-                     'settings.py', 'dictation_control.py', 'scripts/manage-install.py'):
+                     'settings.py', 'dictation_control.py', 'scripts/manage-install.py',
+                     'scripts/shell_completion.py', 'completions/bash/titsdic',
+                     'completions/zsh/_titsdic'):
             target = self.checkout / file
             target.parent.mkdir(parents=True, exist_ok=True)
             shutil.copy2(ROOT / file, target)
@@ -116,6 +118,9 @@ class InstallTests(unittest.TestCase):
                         INSTALL_TEST_STATE=str(self.state),
                         INSTALL_TEST_PYTHON=str(self.fake_bin / 'python'))
         self.env.pop('TITSDIC_PYTHON', None)
+        self.env['SHELL'] = '/bin/bash'
+        for key in ('ZDOTDIR', 'BASH_COMPLETION_USER_DIR', 'FPATH'):
+            self.env.pop(key, None)
 
     def install(self, *options, streamed=False, expect=0, system_packages=False):
         command = ['bash', '-s', '--'] if streamed else ['bash', str(self.checkout / 'install.sh')]
@@ -283,6 +288,7 @@ class InstallTests(unittest.TestCase):
                                 check=True, capture_output=True, text=True, env=self.env)
         self.assertEqual(result.stdout.strip(), official)
         self.install('--no-start', streamed=True)  # Updates the same default checkout.
+        self.ptt('uninstall', checkout=destination)
         custom = self.directory / 'custom install'
         self.install('--no-start', '--install-dir', str(custom), streamed=True)
         self.assertTrue((custom / '.venv-phonon/bin/python').exists())
@@ -340,6 +346,15 @@ class InstallTests(unittest.TestCase):
         self.ptt('uninstall')
         self.assertFalse((self.home / '.config/systemd/user/titsdic.service').exists())
 
+    def test_uninstall_preserves_service_when_completion_was_edited(self):
+        self.install()
+        completion = self.home / '.local/share/bash-completion/completions/titsdic'
+        completion.write_text('# user customization\n')
+        self.assertIn('Completion file was changed', self.ptt('uninstall', expect=1).stderr)
+        self.assertTrue(self.state.exists())
+        self.assertTrue((self.home / '.local/bin/titsdic').exists())
+        self.assertEqual(completion.read_text(), '# user customization\n')
+
     def test_uninstall_refuses_busy_dictation_or_unrelated_launchers(self):
         self.install()
         self.state.write_text('recording')
@@ -386,14 +401,17 @@ class InstallTests(unittest.TestCase):
         installer = self.checkout / 'install.sh'
         installer.write_text(installer.read_text() + "\nprintf 'Updated installer ran.\\n'\n")
         self.commit('New installer')
+        completion_rc = self.home / 'bash update rc'
         result = subprocess.run([self.home / '.local/bin/titsdic', 'update',
-                                 '--skip-system-packages', '--skip-typing-setup', '--no-start'],
+                                 '--skip-system-packages', '--skip-typing-setup', '--no-start',
+                                 '--completion-shell', 'bash', '--completion-rc', str(completion_rc)],
                                 capture_output=True, text=True, env=self.env,
                                 cwd=self.directory, timeout=20)
         self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
         self.assertIn('Updated installer ran.', result.stdout)
         self.assertEqual((destination / 'install.sh').read_text(), installer.read_text())
         self.assertEqual(config.read_text(), '[ptt]\nbuffer_length = 3\n')
+        self.assertIn('titsdic completion', completion_rc.read_text())
 
     def test_update_refuses_dirty_checkout_and_local_only_branch(self):
         self.git('init', '-b', 'master')

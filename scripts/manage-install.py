@@ -61,6 +61,9 @@ def owned_launcher(path, target):
 
 
 def uninstall():
+    import shell_completion
+    # Validate every tracked completion before stopping/removing anything.
+    completion_record = shell_completion.check_removal()
     config_home = Path(os.environ.get("XDG_CONFIG_HOME", Path.home() / ".config"))
     unit = config_home / "systemd/user/titsdic.service"
     launchers = [(Path.home() / ".local/bin/titsdic", (ROOT / "bin/dictate",)),
@@ -98,7 +101,8 @@ def uninstall():
         run("systemctl", "--user", "reset-failed", "titsdic.service", capture=True, check=False)
     for path in owned:
         path.unlink()
-    print("Uninstalled the dictation service and command launchers.")
+    shell_completion.remove(completion_record)
+    print("Uninstalled the dictation service, command launchers, and shell completion.")
     print(f"Kept checkout and Python environment: {ROOT}")
     print(f"Kept settings and service overrides: {config_home}")
     print("Kept logs, cached models, system packages, and shared ydotool/uinput setup.")
@@ -112,6 +116,8 @@ def main(argv=None):
     update_parser.add_argument("--skip-system-packages", action="store_true")
     update_parser.add_argument("--skip-typing-setup", action="store_true")
     update_parser.add_argument("--no-start", action="store_true")
+    update_parser.add_argument("--completion-shell", choices=("auto", "bash", "zsh", "both", "none"))
+    update_parser.add_argument("--completion-rc", type=Path)
     commands.add_parser("uninstall", help="Remove service and launchers; preserve files/settings")
     args = parser.parse_args(argv)
     try:
@@ -119,6 +125,9 @@ def main(argv=None):
             return uninstall()
         options = ["--" + key.replace("_", "-") for key in
                    ("skip_system_packages", "skip_typing_setup", "no_start") if getattr(args, key)]
+        for key in ("completion_shell", "completion_rc"):
+            if getattr(args, key) is not None:
+                options.extend(["--" + key.replace("_", "-"), str(getattr(args, key))])
         return update(options)
     except (OSError, ValueError, subprocess.CalledProcessError) as exc:
         print(f"{args.command.capitalize()} failed: {exc}", file=sys.stderr)

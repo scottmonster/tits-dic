@@ -139,16 +139,48 @@ Update fetches `master` from the checkout's `origin`, fast-forwards, and runs th
 updated installer. It requires a clean `master` checkout without local commits
 outside the remote history. Finish or cancel any active dictation first. Config
 and systemd overrides are preserved. Installer flags `--skip-system-packages`,
-`--skip-typing-setup`, and `--no-start` are also accepted by `update`.
+`--skip-typing-setup`, `--no-start`, `--completion-shell`, and `--completion-rc`
+are also accepted by `update`.
 `titsdic-ptt update` remains available as an alias.
 
 Uninstall disables/stops the dictation service and removes its unit and the three
-installed command launchers. It preserves the checkout, Python environment,
+installed command launchers, completion files, and managed shell configuration
+blocks. It preserves the checkout, Python environment,
 settings, systemd overrides, logs, and cached models. System packages and shared
 `ydotoold`/uinput setup are preserved. You can delete the retained files yourself
 when no longer needed. To reinstall from the retained checkout, run
 `bash install.sh` there. Lifecycle commands also work directly from a checkout
 as `bash bin/tap-to-talk.sh update` or `bash bin/tap-to-talk.sh uninstall`.
+
+## Shell completion
+
+The installer enables completion for `titsdic`, `titsdic-ptt`, and `titsdic-htt`
+in the current interactive Bash or Zsh shell (falling back to `$SHELL` and your
+account's login shell). Open a new shell after installation.
+
+For Zsh, it reads your interactive login configuration to discover `ZDOTDIR`
+and `fpath`. It uses an existing user-owned completion directory outside plugin
+and package trees, or creates `$ZDOTDIR/completions`. A managed block in the
+detected `.zshrc` registers the commands, including when a framework has already
+run `compinit`.
+
+For Bash, it reads the interactive configuration to discover
+`BASH_COMPLETION_USER_DIR` or `XDG_DATA_HOME`. It installs into the resulting
+`bash-completion/completions` directory (`$BASH_COMPLETION_USER_DIR/completions`
+when set). Managed blocks load completion directly, so the `bash-completion`
+package is optional. It handles `.bashrc` and the active login profile, or a
+custom `--rcfile`/`--init-file` detected on the calling interactive Bash process.
+
+Use `--completion-shell bash`, `zsh`, or `both` to select shells explicitly.
+Use `--completion-rc /absolute/path/to/rc` with one shell for a custom startup
+file that cannot be inferred from the calling process. `--completion-shell none`
+skips completion and removes completion previously installed by this checkout.
+Discovery failures stop installation; they do not silently pick default paths.
+
+The local `.titsdic-completions.json` record tracks the files and exact shell
+configuration blocks owned by this checkout. Keep it for updates and uninstall.
+Uninstall uses that record even if your shell or XDG settings have changed, and
+refuses to remove completion files or blocks that you have edited.
 
 ## Troubleshooting and development
 

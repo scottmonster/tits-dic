@@ -1,0 +1,59 @@
+# Bash completion for Tell It Something Dictation. No bash-completion dependency.
+_titsdic_complete() {
+    local cur=${COMP_WORDS[COMP_CWORD]} prev=${COMP_WORDS[COMP_CWORD-1]}
+    local command=${COMP_WORDS[0]##*/} action=${COMP_WORDS[1]-} options values='' value=''
+    local listen='--config --no-config --model --threads --device --pause-ms --dry-run --file --offline --json-out -h --help'
+    local daemon='--config --no-config --model --threads --device --pause-ms --dry-run --file --socket --buffer-length --output-mode --chunk-words -h --help'
+    local update='--skip-system-packages --skip-typing-setup --no-start --completion-shell --completion-rc -h --help'
+    COMPREPLY=()
+    # Also accept --option=value (Bash normally splits '=' into separate words).
+    if [[ $cur == --*=* ]]; then
+        prev=${cur%%=*}
+        value=${prev}=
+        cur=${cur#*=}
+    elif [[ $prev == = && $COMP_CWORD -ge 2 ]]; then
+        prev=${COMP_WORDS[COMP_CWORD-2]}
+    elif [[ $cur == = ]]; then
+        cur=''
+    fi
+    case $prev in
+        --config|--file|--json-out|--socket|--log|--output|--completion-rc)
+            while IFS= read -r options; do COMPREPLY+=("$value$options"); done < <(compgen -f -- "$cur")
+            compopt -o filenames 2>/dev/null || :
+            return ;;
+        --output-mode) values='sentences final' ;;
+        --release) values='all any' ;;
+        --completion-shell) values='auto bash zsh both none' ;;
+        --model) values='phonon-2' ;;
+        --threads|--device|--pause-ms|--buffer-length|--chunk-words|--owner) return ;;
+    esac
+    if [[ -n $values ]]; then
+        while IFS= read -r options; do COMPREPLY+=("$value$options"); done < <(compgen -W "$values" -- "$cur")
+        return
+    fi
+    case $command in
+        titsdic)
+            if [[ $action == update ]]; then options=$update
+            else
+                options=$listen
+                (( COMP_CWORD == 1 )) && options="update $options"
+            fi ;;
+        titsdic-htt) options='--release --log --device --sound-only -h --help' ;;
+        titsdic-ptt)
+            if (( COMP_CWORD == 1 )); then
+                options='start stop toggle cancel status shutdown confirm daemon serve report config update uninstall help -h --help'
+            else
+                case $action in
+                    daemon|serve) options=$daemon ;;
+                    update) options=$update ;;
+                    config) options='--config -h --help'; (( COMP_CWORD == 2 )) && options="path init show $options" ;;
+                    report) options='--output -h --help' ;;
+                    start|stop|toggle|cancel|status|shutdown|confirm) options='--socket --owner --provisional -h --help' ;;
+                    *) options='-h --help' ;;
+                esac
+            fi ;;
+        *) return ;;
+    esac
+    while IFS= read -r values; do COMPREPLY+=("$values"); done < <(compgen -W "$options" -- "$cur")
+}
+complete -F _titsdic_complete titsdic titsdic-ptt titsdic-htt

@@ -18,6 +18,8 @@ Remote installs go in ~/.local/share/titsdic (or --install-dir).
   --skip-system-packages     System dependencies are already installed
   --skip-typing-setup        Keep your existing ydotoold/uinput setup
   --no-start                 Enable autostart, but do not start dictation now
+  --completion-shell SHELL   auto (current shell), bash, zsh, both, or none
+  --completion-rc PATH       Explicit rc file for one shell (otherwise detected)
   -h, --help                 Show this help
 
 Automatic system packages: Debian/Ubuntu/Pop!_OS with apt.
@@ -33,14 +35,18 @@ install_dir=''
 skip_packages=0
 skip_typing=0
 start_now=1
+completion_shell=auto
+completion_rc=''
 while (( $# )); do
     case "$1" in
-        --repo|--ref|--install-dir)
+        --repo|--ref|--install-dir|--completion-shell|--completion-rc)
             (( $# >= 2 )) && [[ -n $2 && $2 != -* ]] || die "$1 needs a value"
             case "$1" in
                 --repo) repo_url=$2 ;;
                 --ref) ref=$2 ;;
                 --install-dir) install_dir=$2 ;;
+                --completion-shell) completion_shell=$2 ;;
+                --completion-rc) completion_rc=$2 ;;
             esac
             shift 2 ;;
         --skip-system-packages) skip_packages=1; shift ;;
@@ -50,6 +56,7 @@ while (( $# )); do
         *) die "Unknown option: $1 (see --help)" ;;
     esac
 done
+case "$completion_shell" in auto|bash|zsh|both|none) ;; *) die 'Invalid --completion-shell; use auto, bash, zsh, both, or none.' ;; esac
 [[ $(uname -s) == Linux ]] || die 'This installer requires Linux.'
 (( EUID != 0 )) || die 'Run as your desktop user, without sudo. Only system setup uses sudo.'
 command -v systemctl >/dev/null || die 'systemd is required.'
@@ -154,6 +161,9 @@ fi
 
 cd -- "$install_dir"
 assert_idle
+completion_options=(--shell "$completion_shell")
+if [[ -n $completion_rc ]]; then completion_options+=(--rc "$completion_rc"); fi
+python3 scripts/shell_completion.py check-install "${completion_options[@]}"
 # A separate environment avoids the experimental Whisper dependency tree.
 if [[ ! -x .venv-phonon/bin/python ]]; then
     uv venv --python 3.13 .venv-phonon </dev/null
@@ -255,6 +265,8 @@ for launcher in titsdic titsdic-ptt titsdic-htt; do
     { printf '#!/usr/bin/env bash\nexec '; printf '%q' "$install_dir/$target"; printf ' "$@"\n'; } >"$bin_dir/$launcher"
     chmod +x -- "$bin_dir/$launcher"
 done
+
+python3 scripts/shell_completion.py install "${completion_options[@]}"
 
 systemctl --user daemon-reload
 systemctl --user enable titsdic.service

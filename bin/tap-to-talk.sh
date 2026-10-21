@@ -42,6 +42,7 @@ Usage: bin/tap-to-talk.sh [toggle]
        bin/tap-to-talk.sh serve [options]
        bin/tap-to-talk.sh config [path|init|show] [--config FILE]
        bin/tap-to-talk.sh update [--skip-system-packages] [--skip-typing-setup] [--no-start]
+                               [--completion-shell auto|bash|zsh|both|none] [--completion-rc PATH]
        bin/tap-to-talk.sh uninstall
 
 Run daemon once to load Phonon-2 on CPU and keep the microphone ready.
@@ -62,7 +63,7 @@ config prints the settings path; init creates defaults without overwriting.
 serve/daemon read ~/.config/titsdic/config.toml (or $XDG_CONFIG_HOME/titsdic/config.toml).
 Use --config FILE to select another file, or --no-config to ignore settings.
 update fetches master and reruns the installer; it requires a clean checkout.
-uninstall removes the service/launchers and keeps the checkout, settings and data.
+uninstall removes the service, launchers and shell completion, keeping the checkout, settings and data.
 EOF
         ;;
     config)

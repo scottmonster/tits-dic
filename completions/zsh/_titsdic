@@ -1,0 +1,75 @@
+#compdef titsdic titsdic-ptt titsdic-htt
+local command=${words[1]:t} action=${words[2]-}
+local -a common update daemon
+common=(
+    '(--no-config)--config[Settings file]:file:_files'
+    '(--config)--no-config[Ignore settings file]'
+    '--model[Speech model]:model:(phonon-2)'
+    '--threads[CPU threads]:count:'
+    '--device[Input device ID or name]:device:'
+    '--pause-ms[Pause duration]:milliseconds:'
+    '--dry-run[Print text without typing]'
+    '--file[Input recording]:file:_files'
+    '(-h --help)'{-h,--help}'[Show help]'
+)
+update=(
+    '--skip-system-packages[Skip system packages]'
+    '--skip-typing-setup[Keep typing setup]'
+    '--no-start[Do not start dictation now]'
+    '--completion-shell[Shell completion target]:shell:(auto bash zsh both none)'
+    '--completion-rc[Shell configuration file]:file:_files'
+    '(-h --help)'{-h,--help}'[Show help]'
+)
+daemon=(
+    '--socket[Control socket]:file:_files'
+    '--buffer-length[Recent audio to retain]:seconds:'
+    '--output-mode[When to type text]:mode:(sentences final)'
+    '--chunk-words[Maximum words per chunk]:count:'
+)
+case $command in
+    titsdic)
+        if [[ $action == update ]]; then
+            words=("${words[@]:1}")
+            (( CURRENT-- ))
+            _arguments "${update[@]}"
+        else
+            _arguments "${common[@]}" '--offline[Transcribe without typing]' \
+                '--json-out[Write JSON result]:file:_files' '1:command:(update)'
+        fi ;;
+    titsdic-htt)
+        _arguments '--release[When to stop]:mode:(all any)' '--log[Timing log]:file:_files' \
+            '--device[PulseAudio output device]:device:' '--sound-only[Only play tones]' \
+            '(-h --help)'{-h,--help}'[Show help]' ;;
+    titsdic-ptt)
+        if (( CURRENT == 2 )); then
+            if [[ $PREFIX == -* ]]; then
+                _arguments '(-h --help)'{-h,--help}'[Show help]'
+                return
+            fi
+            local -a actions
+            actions=(
+                'start:Start recording' 'stop:Stop recording' 'toggle:Toggle recording'
+                'cancel:Discard pending text' 'status:Show daemon status'
+                'shutdown:Stop daemon' 'confirm:Confirm provisional capture'
+                'daemon:Start background daemon' 'serve:Run foreground daemon'
+                'report:Collect diagnostics' 'config:Manage settings'
+                'update:Update installation' 'uninstall:Uninstall' 'help:Show help'
+            )
+            _describe 'command' actions
+        else
+            # _arguments now sees the selected subcommand as its command word.
+            words=("${words[@]:1}")
+            (( CURRENT-- ))
+            case $action in
+                daemon|serve) _arguments "${common[@]}" "${daemon[@]}" ;;
+                update) _arguments "${update[@]}" ;;
+                config) _arguments '--config[Settings file]:file:_files' \
+                    '1:action:(path init show)' '(-h --help)'{-h,--help}'[Show help]' ;;
+                report) _arguments '--output[Diagnostic output]:file:_files' '(-h --help)'{-h,--help}'[Show help]' ;;
+                start|stop|toggle|cancel|status|shutdown|confirm)
+                    _arguments '--socket[Control socket]:file:_files' '--owner[Session token]:token:' \
+                        '--provisional[Start provisional capture]' '(-h --help)'{-h,--help}'[Show help]' ;;
+                *) _arguments '(-h --help)'{-h,--help}'[Show help]' ;;
+            esac
+        fi ;;
+esac

@@ -1,6 +1,11 @@
 #!/usr/bin/env bash
 set -euo pipefail
 repo_dir=$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")/.." && pwd)
+# Updating must work even when the dictation environment needs repair.
+case "${1:-}" in
+    update) exec python3 "$repo_dir/scripts/manage-install.py" "$@" ;;
+    -h|--help) printf 'Update this installation: titsdic update [installer options]\n\n' ;;
+esac
 python_bin=${TITSDIC_PYTHON:-"$repo_dir/.venv-phonon/bin/python"}
 if [[ -z ${TITSDIC_PYTHON:-} && ! -x $python_bin ]]; then
     python_bin=$repo_dir/build/asr-compare/env-phonon/bin/python

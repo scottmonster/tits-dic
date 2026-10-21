@@ -104,6 +104,80 @@ class SessionTests(unittest.TestCase):
             self.session.worker.join(timeout=2)
         self.typed.assert_not_called()
 
+    def test_provisional_capture_opens_mic_before_confirmation_without_recognizing(self):
+        waiting, decoding = threading.Event(), threading.Event()
+        original_wait = self.session.confirmed.wait
+        def wait_for_confirmation(timeout):
+            waiting.set()
+            return original_wait(timeout)
+        def collect(*args, **kwargs):
+            decoding.set()
+            return self.collect_until_eof()
+        with patch.object(self.session.confirmed, "wait", side_effect=wait_for_confirmation), \
+             patch.object(p, "collect_one_utterance", side_effect=collect) as recognize, \
+             contextlib.redirect_stdout(io.StringIO()):
+            self.session.start(provisional=True, owner="shortcut-a")
+            self.stream.start.assert_called_once()
+            self.assertTrue(waiting.wait(2))
+            self.assertTrue(self.session.status()["provisional"])
+            recognize.assert_not_called()
+            self.typed.assert_not_called()
+            self.assertTrue(self.session.confirm("shortcut-a")["ok"])
+            self.assertTrue(decoding.wait(2))
+            self.session.stop(owner="shortcut-a")
+            self.session.worker.join(2)
+        self.assertFalse(self.session.worker.is_alive())
+        self.typed.assert_called_once()
+
+    def test_cancel_provisional_capture_discards_audio_without_inference(self):
+        with patch.object(p, "collect_one_utterance") as recognize, \
+             contextlib.redirect_stdout(io.StringIO()):
+            self.session.start(provisional=True, owner="shortcut-a")
+            p.audio_q.put(p.np.zeros(p.FRAME_SAMPLES, dtype=p.np.float32))
+            self.assertTrue(self.session.stop(cancel=True, owner="shortcut-a")["ok"])
+            self.session.worker.join(2)
+        self.assertFalse(self.session.worker.is_alive())
+        self.assertEqual(self.session.state, "idle")
+        self.stream.close.assert_called_once()
+        self.assertTrue(p.audio_q.empty())
+        recognize.assert_not_called()
+        self.typed.assert_not_called()
+        self.started[-2].assert_not_called()
+
+    def test_unconfirmed_capture_expires_and_closes_microphone(self):
+        with patch.object(self.session.confirmed, "wait", return_value=False), \
+             patch.object(p, "collect_one_utterance") as recognize, \
+             contextlib.redirect_stdout(io.StringIO()):
+            self.session.start(provisional=True, owner="shortcut-a")
+            self.session.worker.join(2)
+        self.assertFalse(self.session.worker.is_alive())
+        self.assertEqual(self.session.state, "idle")
+        self.stream.close.assert_called_once()
+        recognize.assert_not_called()
+        self.typed.assert_not_called()
+
+    def test_wrong_owner_cannot_confirm_or_cancel_another_recording(self):
+        with patch.object(p, "collect_one_utterance") as recognize, \
+             contextlib.redirect_stdout(io.StringIO()):
+            self.session.start(provisional=True, owner="shortcut-a")
+            self.assertFalse(self.session.confirm("shortcut-b")["ok"])
+            self.assertFalse(self.session.stop(cancel=True, owner="shortcut-b")["ok"])
+            self.assertFalse(self.session.cancelled.is_set())
+            self.assertTrue(self.session.status()["provisional"])
+            self.stream.stop.assert_not_called()
+            self.session.stop(cancel=True, owner="shortcut-a")
+            self.session.worker.join(2)
+        recognize.assert_not_called()
+
+    def test_plain_stop_of_unconfirmed_capture_also_discards_it(self):
+        with patch.object(p, "collect_one_utterance") as recognize, \
+             contextlib.redirect_stdout(io.StringIO()):
+            self.session.start(provisional=True, owner="shortcut-a")
+            self.session.stop()
+            self.session.worker.join(2)
+        recognize.assert_not_called()
+        self.typed.assert_not_called()
+
     def test_capture_failure_returns_to_idle(self):
         self.stream.start.side_effect = RuntimeError("No input device")
         with self.assertRaisesRegex(RuntimeError, "No input device"):
@@ -283,7 +357,7 @@ class EntryTests(unittest.TestCase):
     def setUp(self):
         temp = tempfile.TemporaryDirectory()
         self.addCleanup(temp.cleanup)
-        env = patch.dict(os.environ, TITSDIC_LOG_DIR=temp.name)
+        env = patch.dict(os.environ, TITSDIC_LOG_DIR=temp.name, XDG_CONFIG_HOME=temp.name)
         env.start()
         self.addCleanup(env.stop)
         self.addCleanup(diag.close)

@@ -17,29 +17,11 @@ import time
 import uuid
 import diagnostics as diag
 import user_feedback
+import settings
 from sentence_output import SentenceOutput
+from dictation_control import default_socket, request
 
 ROOT = Path(__file__).resolve().parent
-
-
-def default_socket():
-    runtime = Path(os.environ.get("XDG_RUNTIME_DIR", f"/tmp/titsdic-{os.getuid()}"))
-    return runtime / "titsdic" / "ptt.sock"
-
-
-def request(path, command, *, metadata=True):
-    with socket.socket(socket.AF_UNIX, socket.SOCK_STREAM) as connection:
-        connection.settimeout(10)
-        connection.connect(str(path))
-        payload = ({"command": command, "run_id": os.environ["TITSDIC_RUN_ID"]}
-                   if metadata and os.environ.get("TITSDIC_RUN_ID") else command)
-        message = json.dumps(payload) if isinstance(payload, dict) else payload
-        connection.sendall(message.encode() + b"\n")
-        with connection.makefile("rb") as reader:
-            result = json.loads(reader.readline(1024 * 1024))
-    if isinstance(payload, dict) and result.get("error") == "Unknown PTT command":
-        return request(path, command, metadata=False)  # Compatibility with an already-running older daemon.
-    return result
 
 
 class BufferedMicrophone:
@@ -117,6 +99,8 @@ class LiveSession:
         self.worker = None
         self.feeder = None
         self.cancelled = threading.Event()
+        self.confirmed = threading.Event()
+        self.owner = None
         self.feed_stop = threading.Event()
         self.last_text = ""
         self.last_error = None
@@ -142,6 +126,7 @@ class LiveSession:
         with self.lock:
             return {"ok": True, "state": self.state, "model": self.args.model, "device": "cpu",
                     "keyboard_output": not self.args.dry_run, "last_text": self.last_text,
+                    "provisional": self.state == "recording" and not self.confirmed.is_set(),
                     "last_error": self.last_error, "last_final_asr_delay_ms": self.last_delay_ms,
                     "session_id": self.session_id, "run_id": self.run_id, "daemon_pid": os.getpid(),
                     "log_file": diag.current_log_file(),
@@ -150,13 +135,16 @@ class LiveSession:
                                "output_mode": self.output_mode, "chunk_words": self.chunk_words,
                                "input_device": self.args.device, "file": str(self.args.file) if self.args.file else None}}
 
-    def start(self, run_id=None):
+    def start(self, run_id=None, *, provisional=False, owner=None):
         with self.lock:
+            if provisional and not owner:
+                return {"ok": False, "error": "Provisional capture requires an owner"}
             if self.state != "idle":
                 self.log("start_rejected", state=self.state, requesting_run_id=run_id)
                 return {"ok": False, "error": f"Cannot start while {self.state}", "session_id": self.session_id}
             self.session_id = uuid.uuid4().hex[:16]
             self.run_id = run_id
+            self.owner = owner
             self.last_text, self.last_delay_ms = "", None
             self.session_started = time.perf_counter()
             self.log("session_starting", input_device=self.args.device,
@@ -179,6 +167,9 @@ class LiveSession:
             self.metrics.event_logger = self.log
             p.metrics_global = self.metrics
             self.cancelled.clear()
+            self.confirmed.clear()
+            if not provisional:
+                self.confirmed.set()
             self.feed_stop.clear()
             self.last_error = None
             self.state = "recording"
@@ -230,12 +221,25 @@ class LiveSession:
                 stream.close()
                 self.log("capture_closed", close_ms=(time.perf_counter()-closed_at)*1000)
 
-    def stop(self, cancel=False):
+    def confirm(self, owner):
         with self.lock:
+            if not owner or owner != self.owner or self.state != "recording" or self.cancelled.is_set():
+                return {"ok": False, "error": "Provisional session is no longer active"}
+            self.confirmed.set()
+            self.log("capture_confirmed")
+            return {"ok": True, "state": self.state, "session_id": self.session_id}
+
+    def stop(self, cancel=False, *, owner=None):
+        with self.lock:
+            if owner is not None and (not owner or owner != self.owner):
+                return {"ok": False, "error": "Session belongs to another shortcut invocation"}
+            # Unconfirmed capture is always discarded, even on a plain stop.
+            cancel = cancel or not self.confirmed.is_set()
             self.log("cancel_requested" if cancel else "stop_requested", state=self.state,
                      queue_frames=self.p.audio_q.qsize() if self.state != "idle" else 0)
             if cancel:
                 self.cancelled.set()
+                self.confirmed.set()  # Wake a provisional worker so it can discard capture.
             if self.state == "recording":
                 self.state = "processing"
                 self.feed_stop.set()
@@ -255,6 +259,13 @@ class LiveSession:
         p = self.p
         output = None
         try:
+            # Capture runs while the shortcut checks keys and prepares tones.
+            # Abandoned startup cannot keep the microphone recording forever.
+            if not self.confirmed.wait(timeout=10):
+                self.log("capture_confirmation_expired")
+                self.stop(cancel=True)
+            if self.cancelled.is_set():
+                return
             if self.output_mode == "sentences" and not self.args.dry_run:
                 output = SentenceOutput(lambda text: p.type_with_ydotool(text, metrics=self.metrics),
                                         self.cancelled, word_limit=self.chunk_words, emit=self.log)
@@ -299,6 +310,12 @@ class LiveSession:
                 except Exception as exc:
                     self.last_error = f"{type(exc).__name__}: {exc}"
                     self.log("cleanup_failed", exc=exc)
+                if self.cancelled.is_set():
+                    while True:
+                        try:
+                            p.audio_q.get_nowait()
+                        except queue.Empty:
+                            break
                 self.metrics.health_tick(force=True)
                 self.log("session_finished", cancelled=self.cancelled.is_set(), error=self.last_error,
                          input_seconds=self.metrics.input_samples/p.TARGET_SR,
@@ -385,7 +402,14 @@ def serve(args):
                             if command != "status":
                                 diag.event("command_received", command=command, run_id=run_id,
                                            session_id=session.session_id)
-                            if command == "start": result = session.start(run_id=run_id)
+                            if command == "start": result = session.start(run_id=run_id, owner=payload.get("owner"))
+                            elif command == "prepare":
+                                result = session.start(run_id=run_id, provisional=True, owner=payload.get("owner"))
+                            elif command == "confirm": result = session.confirm(payload.get("owner"))
+                            elif command in {"stop_owned", "cancel_owned"}:
+                                owner = payload.get("owner")
+                                result = (session.stop(cancel=command == "cancel_owned", owner=owner)
+                                          if owner else {"ok": False, "error": "Missing session owner"})
                             elif command == "stop": result = session.stop()
                             elif command == "cancel": result = session.stop(cancel=True)
                             elif command == "toggle":
@@ -422,6 +446,10 @@ def main(argv=None):
     commands = parser.add_subparsers(dest="command", required=True)
     for name in ("listen", "serve"):
         sub = commands.add_parser(name)
+        config = sub.add_mutually_exclusive_group()
+        config.add_argument("--config", type=Path,
+                            help="Settings file (default: ~/.config/titsdic/config.toml; honors XDG_CONFIG_HOME)")
+        config.add_argument("--no-config", action="store_true", help="Ignore the user settings file")
         sub.add_argument("--model", default="phonon-2")
         sub.add_argument("--threads", type=int, default=4)
         sub.add_argument("--device", help="Input device ID or name (system default if omitted)")
@@ -442,12 +470,25 @@ def main(argv=None):
     client = commands.add_parser("command")
     client.add_argument("action", choices=("start", "stop", "toggle", "cancel", "status", "shutdown"))
     client.add_argument("--socket", type=Path, default=default_socket())
+    # Parse once to locate the config, then set defaults before parsing explicit
+    # options again. Argparse applies CLI types/choices only to CLI values;
+    # settings.load validates file values independently before capture/model load.
     args = parser.parse_args(argv)
+    if args.command != "command" and not args.no_config:
+        try:
+            configured = settings.load(args.config)
+        except ValueError as exc:
+            parser.error(str(exc))
+        defaults = dict(configured["dictation"])
+        if args.command == "serve":
+            defaults.update(configured["ptt"])
+        commands.choices[args.command].set_defaults(**defaults)
+        args = parser.parse_args(argv)
     if args.command == "command":
         try:
             result = request(args.socket, args.action)
         except (OSError, ValueError) as exc:
-            print(f"PTT unavailable: {exc}. Run bin/ptt.sh daemon first.", file=sys.stderr)
+            print(f"PTT unavailable: {exc}. Run bin/tap-to-talk.sh daemon first.", file=sys.stderr)
             return 1
         print(json.dumps(result))
         return 0 if result.get("ok") else 1

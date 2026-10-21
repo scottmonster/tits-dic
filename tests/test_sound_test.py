@@ -16,7 +16,10 @@ log=pathlib.Path(os.environ['TEST_EVENTS'])
 def note(text):
  with log.open('a') as f: f.write(text+'\\n')
 def now(): return time.time_ns()//1000
+if os.environ.get('TEST_START_WAIT_SNAPSHOT'):
+ while not pathlib.Path(os.environ['TEST_CAPTURE']).exists():time.sleep(.001)
 note('snapshot')
+pathlib.Path(os.environ['TEST_SNAPSHOT']).touch()
 if os.environ['TEST_MODE']=='none':sys.exit(2)
 t=now()
 print(f'HELD\\t{t}\\t{t}\\t{t}\\tKEY_LEFTCTRL + KEY_SPACE',flush=True)
@@ -38,12 +41,29 @@ if os.environ.get('TEST_SLOW_PLAYER') and pathlib.Path(sys.argv[-1]).name=='star
  with open(os.environ['TEST_EVENTS'],'a') as f:f.write('start-finished\\n')
 '''
 PTT = '''#!/usr/bin/python3
-import json, os, sys
-with open(os.environ['TEST_EVENTS'],'a') as f:f.write('ptt-'+sys.argv[1]+'\\n')
-if sys.argv[1]=='start' and os.environ.get('TEST_BUSY'):
- print(json.dumps({'ok':False,'error':'busy'}))
+import json, os, pathlib, sys, time
+action = sys.argv[1]
+owner = sys.argv[sys.argv.index('--owner')+1]
+state = pathlib.Path(os.environ['TEST_CAPTURE'])
+def note(text):
+ with open(os.environ['TEST_EVENTS'],'a') as f:f.write(text+'\\n')
+if action != 'start' and (not state.exists() or state.read_text() != owner):
+ note('ptt-'+action+'-rejected')
+ print(json.dumps({'ok':False,'error':'different owner'}))
  sys.exit(1)
-print(json.dumps({'ok':True,'state':'recording' if sys.argv[1]=='start' else 'processing'}))
+note('ptt-'+action)
+if action == 'start':
+ assert '--provisional' in sys.argv
+ if os.environ.get('TEST_BUSY'):
+  print(json.dumps({'ok':False,'error':'busy'}))
+  sys.exit(1)
+ state.write_text(owner)
+ if os.environ.get('TEST_START_WAIT_SNAPSHOT'):
+  while not pathlib.Path(os.environ['TEST_SNAPSHOT']).exists():time.sleep(.001)
+ if os.environ.get('TEST_LOST_START_REPLY'):sys.exit(1)
+elif action in ('cancel','stop'):
+ state.unlink()
+print(json.dumps({'ok':True,'state':'recording' if action in ('start','confirm') else 'processing'}))
 '''
 
 
@@ -60,6 +80,8 @@ class SoundTimingTests(unittest.TestCase):
         self.env = dict(os.environ, PATH=str(self.directory)+os.pathsep+os.environ['PATH'],
                         TEST_MODE='normal', TEST_EVENTS=str(self.directory/'events'),
                         TEST_GATE=str(self.directory/'release'),
+                        TEST_SNAPSHOT=str(self.directory/'snapshot'),
+                        TEST_CAPTURE=str(self.directory/'capture'),
                         TEST_PLAYER_ARGS=str(self.directory/'args'),
                         SOUND_PLAYER=str(self.directory/'player'),
                         PTT_COMMAND=str(self.directory/'ptt'),
@@ -67,7 +89,7 @@ class SoundTimingTests(unittest.TestCase):
 
     def run_script(self, *options, dictation=False):
         mode = [] if dictation else ['--sound-only']
-        return subprocess.run([str(ROOT/'bin/sound-test.sh'), '--log', str(self.log), *mode, *options],
+        return subprocess.run([str(ROOT/'bin/hold-to-talk.sh'), '--log', str(self.log), *mode, *options],
                               env=self.env, capture_output=True, text=True, timeout=5)
 
     def test_timings_separate_startup_playback_and_release(self):
@@ -150,7 +172,7 @@ class SoundTimingTests(unittest.TestCase):
         monitor = self.directory/'python3'
         monitor.write_text(MONITOR.replace("while not pathlib.Path(os.environ['TEST_GATE']).exists():time.sleep(.001)",
                                           'while True:time.sleep(.01)'))
-        process = subprocess.Popen([str(ROOT/'bin/sound-test.sh'), '--log', str(self.log)],
+        process = subprocess.Popen([str(ROOT/'bin/hold-to-talk.sh'), '--log', str(self.log)],
                                    env=self.env, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
         self.addCleanup(lambda: process.kill() if process.poll() is None else None)
         for _ in range(200):
@@ -177,11 +199,51 @@ class SoundTimingTests(unittest.TestCase):
         self.assertLess(events.index('ptt-stop'), events.index('end.wav'))
         self.assertNotIn('ptt-cancel', events)
 
-    def test_shortcut_released_during_setup_does_not_start_late_capture(self):
+    def test_shortcut_released_during_setup_cancels_provisional_capture(self):
         self.env['TEST_MODE'] = 'early'
         result = self.run_script(dictation=True)
         self.assertEqual(result.returncode, 0, result.stderr)
-        self.assertNotIn('ptt-start', (self.directory/'events').read_text())
+        events = (self.directory/'events').read_text().splitlines()
+        self.assertIn('ptt-start', events)
+        self.assertIn('ptt-cancel', events)
+        self.assertNotIn('ptt-confirm', events)
+        self.assertNotIn('ptt-stop', events)
+        self.assertFalse((self.directory/'capture').exists())
+
+    def test_start_request_and_keyboard_snapshot_run_concurrently(self):
+        self.env['TEST_START_WAIT_SNAPSHOT'] = '1'
+        result = self.run_script(dictation=True)
+        self.assertEqual(result.returncode, 0, result.stderr)
+        events = (self.directory/'events').read_text().splitlines()
+        self.assertLess(events.index('ptt-start'), events.index('ptt-confirm'))
+        self.assertLess(events.index('ptt-start'), events.index('snapshot'))
+        self.assertLess(events.index('snapshot'), events.index('ptt-confirm'))
+        self.assertLess(events.index('ptt-confirm'), events.index('start.wav'))
+
+    def test_failed_key_snapshot_discards_early_capture(self):
+        self.env['TEST_MODE'] = 'none'
+        result = self.run_script(dictation=True)
+        self.assertEqual(result.returncode, 2, result.stderr)
+        events = (self.directory/'events').read_text().splitlines()
+        self.assertIn('ptt-cancel', events)
+        self.assertNotIn('ptt-confirm', events)
+        self.assertNotIn('start.wav', events)
+
+    def test_playback_setup_failure_cancels_without_confirming(self):
+        result = self.run_script('--device', 'unsupported-by-custom-player', dictation=True)
+        self.assertEqual(result.returncode, 1, result.stderr)
+        events = (self.directory/'events').read_text().splitlines()
+        self.assertIn('ptt-start', events)
+        self.assertIn('ptt-cancel', events)
+        self.assertNotIn('ptt-confirm', events)
+
+    def test_lost_start_reply_still_cancels_only_our_capture(self):
+        self.env['TEST_LOST_START_REPLY'] = '1'
+        result = self.run_script(dictation=True)
+        self.assertEqual(result.returncode, 1, result.stderr)
+        events = (self.directory/'events').read_text().splitlines()
+        self.assertIn('ptt-cancel', events)
+        self.assertFalse((self.directory/'capture').exists())
 
     def test_busy_daemon_does_not_stop_someone_elses_recording(self):
         self.env['TEST_BUSY'] = '1'

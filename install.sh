@@ -6,14 +6,15 @@ trap 'printf "Installation failed at line %s. Fix the error above and rerun.\n" 
 usage() {
     cat <<'EOF'
 Usage: bash install.sh [options]
-       curl -fsSL RAW_INSTALL_URL | bash -s -- --repo GITHUB_REPO_URL
+       curl -fsSL https://raw.githubusercontent.com/scottmonster/tits-dic/master/install.sh | bash
 
-Without --repo, install the checkout containing this script in place.
-With --repo, clone/update it in ~/.local/share/titsdic (or --install-dir).
+Running a local script installs its checkout in place unless --repo is given.
+When piped to bash, clone/update scottmonster/tits-dic from master by default.
+Remote installs go in ~/.local/share/titsdic (or --install-dir).
 
-  --repo URL                 Git repository to clone (HTTPS or SSH)
-  --ref BRANCH_OR_TAG        Revision (default: repository default branch)
-  --install-dir PATH         Checkout location; requires --repo
+  --repo URL                 Override the Git repository (HTTPS or SSH)
+  --ref BRANCH_OR_TAG        Revision (default: master)
+  --install-dir PATH         Remote checkout location
   --skip-system-packages     System dependencies are already installed
   --skip-typing-setup        Keep your existing ydotoold/uinput setup
   --no-start                 Enable autostart, but do not start dictation now
@@ -27,7 +28,7 @@ EOF
 }
 die() { printf 'Error: %s\n' "$*" >&2; exit 1; }
 repo_url=''
-ref=''
+ref=master
 install_dir=''
 skip_packages=0
 skip_typing=0
@@ -53,17 +54,17 @@ done
 (( EUID != 0 )) || die 'Run as your desktop user, without sudo. Only system setup uses sudo.'
 command -v systemctl >/dev/null || die 'systemd is required.'
 systemctl --user show-environment >/dev/null || die 'Run from a terminal in your logged-in desktop session (systemd --user is unavailable).'
-[[ -z $install_dir || -n $repo_url ]] || die '--install-dir requires --repo.'
 [[ $ref != -* ]] || die 'Invalid --ref.'
 
-# Resolve local mode before doing any installation. A streamed script has no
-# reliable source directory; it must be given its repository explicitly.
-if [[ -z $repo_url ]]; then
-    script_path=${BASH_SOURCE[0]:-}
-    [[ -n $script_path && -f $script_path ]] || die 'When piping to bash, pass --repo https://github.com/OWNER/REPO.git.'
+# Resolve local mode before doing any installation. A streamed script uses the
+# official repository; a local script still installs its own complete checkout.
+script_path=${BASH_SOURCE[0]:-}
+if [[ -z $repo_url && -n $script_path && -f $script_path ]]; then
+    [[ -z $install_dir ]] || die '--install-dir requires --repo when running a local script.'
     install_dir=$(cd -- "$(dirname -- "$script_path")" && pwd -P)
     [[ -f $install_dir/dictation.py && -f $install_dir/requirements-dictation.txt ]] || die 'Run the install.sh from a complete checkout, or pass --repo.'
 else
+    repo_url=${repo_url:-https://github.com/scottmonster/tits-dic.git}
     install_dir=${install_dir:-${XDG_DATA_HOME:-$HOME/.local/share}/titsdic}
 fi
 [[ $install_dir != *$'\n'* && $install_dir != *$'\r'* ]] || die 'Install paths cannot contain newlines.'
@@ -76,21 +77,47 @@ as_root() {
 
 if (( ! skip_packages )); then
     command -v apt-get >/dev/null || die 'Automatic packages require apt. See README prerequisites and --skip-system-packages.'
-    printf 'Installing system dependencies (sudo may ask for your password)...\n'
-    as_root apt-get update </dev/null
+    command -v dpkg-query >/dev/null || die 'dpkg-query is required to check installed system packages.'
     packages=(ca-certificates curl git ffmpeg libportaudio2 libsndfile1
               ydotool libglib2.0-bin pulseaudio-utils python3)
-    # Older distributions package the daemon separately; newer ones bundle it.
-    if apt-cache show ydotoold >/dev/null 2>&1; then packages+=(ydotoold); fi
-    as_root apt-get install -y "${packages[@]}" </dev/null
+    missing_packages=()
+    for package in "${packages[@]}"; do
+        if [[ $(dpkg-query -W -f='${db:Status-Status}' "$package" 2>/dev/null || true) != installed ]]; then
+            missing_packages+=("$package")
+        fi
+    done
+    daemon_missing=0
+    command -v ydotoold >/dev/null || daemon_missing=1
+    if (( ${#missing_packages[@]} == 0 && ! daemon_missing )); then
+        printf 'System dependencies are already installed; skipping APT.\n'
+    else
+        printf 'Installing missing system dependencies (sudo may ask for your password):'
+        if (( ${#missing_packages[@]} )); then printf ' %s' "${missing_packages[@]}"; fi
+        if (( daemon_missing )); then printf ' ydotoold'; fi
+        printf '\n'
+        if ! as_root apt-get update </dev/null; then
+            die 'APT refresh failed because of configured repository errors. Fix those repositories and rerun. Use --skip-system-packages only if you have installed all prerequisites manually.'
+        fi
+        # Older distributions package the daemon separately; newer ones bundle it.
+        if (( daemon_missing )); then
+            if apt-cache show ydotoold >/dev/null 2>&1; then
+                missing_packages+=(ydotoold)
+            else
+                missing_packages+=(ydotool)
+            fi
+        fi
+        as_root apt-get install -y "${missing_packages[@]}" </dev/null
+    fi
 fi
 for dependency in curl git ffmpeg python3 ydotool ydotoold; do
     command -v "$dependency" >/dev/null || die "Missing $dependency. Install the README prerequisites first."
 done
 
 assert_idle() {
-    local status state
-    if [[ -x $install_dir/bin/ptt.sh ]] && status=$(bash "$install_dir/bin/ptt.sh" status 2>/dev/null); then
+    local status state control_script=$install_dir/bin/tap-to-talk.sh
+    # An older checkout may not have the renamed script until after fetching.
+    [[ -x $control_script ]] || control_script=$install_dir/bin/ptt.sh
+    if [[ -x $control_script ]] && status=$(bash "$control_script" status 2>/dev/null); then
         state=$(python3 -c 'import json,sys; print(json.load(sys.stdin)["state"])' <<<"$status")
         [[ $state == idle ]] || die 'Dictation is busy. Finish/cancel it and rerun the installer.'
     fi
@@ -100,14 +127,9 @@ assert_idle
 if [[ -n $repo_url ]]; then
     if [[ -e $install_dir ]]; then
         [[ -d $install_dir/.git ]] || die "Already exists and is not a Git checkout: $install_dir"
-        [[ $(git -C "$install_dir" remote get-url origin) == "$repo_url" ]] || die 'Existing checkout has a different origin; use a different --install-dir.'
+        [[ $(git -C "$install_dir" config --get remote.origin.url) == "$repo_url" ]] || die 'Existing checkout has a different origin; use a different --install-dir.'
         [[ -z $(git -C "$install_dir" status --porcelain) ]] || die 'Checkout has local changes. Commit/stash them before updating, or use a different --install-dir.'
-        update_ref=$ref
-        if [[ -z $update_ref ]]; then
-            update_ref=$(git -C "$install_dir" symbolic-ref refs/remotes/origin/HEAD) || die 'Cannot determine default branch; pass --ref.'
-            update_ref=${update_ref#refs/remotes/origin/}
-        fi
-        git -C "$install_dir" fetch origin "$update_ref" </dev/null
+        git -C "$install_dir" fetch origin "$ref" </dev/null
         git -C "$install_dir" merge --ff-only FETCH_HEAD </dev/null
     else
         mkdir -p -- "$(dirname -- "$install_dir")"
@@ -117,7 +139,7 @@ if [[ -n $repo_url ]]; then
     fi
 fi
 install_dir=$(cd -- "$install_dir" && pwd -P)
-[[ -f $install_dir/requirements-dictation.txt && -f $install_dir/bin/ptt.sh ]] || die 'The selected revision does not include the dictation installer/runtime.'
+[[ -f $install_dir/requirements-dictation.txt && -f $install_dir/bin/tap-to-talk.sh && -f $install_dir/bin/hold-to-talk.sh ]] || die 'The selected revision does not include the dictation installer/runtime.'
 
 export PATH="$HOME/.local/bin:$PATH"
 if ! command -v uv >/dev/null; then
@@ -190,15 +212,17 @@ EOF
     systemctl --user is-active --quiet ydotoold.service || die 'ydotoold failed. Inspect journalctl --user -u ydotoold.service.'
 fi
 
-# Write a unit with quoted/escaped absolute paths. User configuration belongs
-# in systemctl --user edit titsdic.service; reruns preserve those drop-ins.
+# Create settings once; reruns preserve both this file and systemd drop-ins.
+.venv-phonon/bin/python settings.py init
+
+# Write a unit with quoted/escaped absolute paths.
 .venv-phonon/bin/python - "$install_dir" "$unit_dir/titsdic.service" <<'PY'
 from pathlib import Path
 import sys
 root, destination = sys.argv[1:]
 def quoted(value):
     return '"' + value.replace('\\', '\\\\').replace('"', '\\"').replace('%', '%%') + '"'
-executable = quoted(root + '/bin/ptt.sh')
+executable = quoted(root + '/bin/tap-to-talk.sh')
 Path(destination).write_text(f'''[Unit]
 Description=Tell It Something Dictation (Phonon-2 CPU)
 After=pipewire.service pipewire-pulse.service pulseaudio.service ydotoold.service
@@ -222,9 +246,12 @@ PY
 
 # Shell wrappers work even if the checkout path contains spaces. Do not use
 # symlinks: the launchers locate Python and source files relative to themselves.
-for launcher in titsdic titsdic-ptt; do
-    target=bin/dictate
-    [[ $launcher != titsdic-ptt ]] || target=bin/ptt.sh
+for launcher in titsdic titsdic-ptt titsdic-htt; do
+    case "$launcher" in
+        titsdic) target=bin/dictate ;;
+        titsdic-ptt) target=bin/tap-to-talk.sh ;;
+        titsdic-htt) target=bin/hold-to-talk.sh ;;
+    esac
     { printf '#!/usr/bin/env bash\nexec '; printf '%q' "$install_dir/$target"; printf ' "$@"\n'; } >"$bin_dir/$launcher"
     chmod +x -- "$bin_dir/$launcher"
 done
@@ -233,14 +260,14 @@ systemctl --user daemon-reload
 systemctl --user enable titsdic.service
 if (( start_now )); then
     # Take over an old manually launched daemon only when it is idle.
-    if status=$(./bin/ptt.sh status 2>/dev/null); then
+    if status=$(./bin/tap-to-talk.sh status 2>/dev/null); then
         state=$(.venv-phonon/bin/python -c 'import json,sys; print(json.load(sys.stdin)["state"])' <<<"$status")
         [[ $state == idle ]] || die 'Dictation is busy. Finish/cancel it and rerun the installer.'
         if ! systemctl --user is-active --quiet titsdic.service; then
-            ./bin/ptt.sh shutdown
+            ./bin/tap-to-talk.sh shutdown
             # Shutdown acknowledges before socket/lock cleanup is complete.
             for (( attempt=0; attempt<50; attempt++ )); do
-                ./bin/ptt.sh status >/dev/null 2>&1 || break
+                ./bin/tap-to-talk.sh status >/dev/null 2>&1 || break
                 sleep .1
             done
         fi
@@ -248,7 +275,7 @@ if (( start_now )); then
     systemctl --user restart titsdic.service
     ready=0
     for (( attempt=0; attempt<180; attempt++ )); do
-        if ./bin/ptt.sh status; then ready=1; break; fi
+        if ./bin/tap-to-talk.sh status; then ready=1; break; fi
         sleep 1
     done
     if (( ! ready )); then
@@ -258,7 +285,9 @@ if (( start_now )); then
 fi
 printf '\nInstalled in %s\n' "$install_dir"
 printf 'Autostart enabled: dictation starts when you log in after reboot and restarts if it exits.\n'
-printf 'Commands: %s/titsdic and %s/titsdic-ptt\n' "$bin_dir" "$bin_dir"
+printf 'Commands: %s/titsdic, %s/titsdic-ptt and %s/titsdic-htt\n' "$bin_dir" "$bin_dir" "$bin_dir"
+printf 'Settings: titsdic-ptt config (restart the service after editing)\n'
+printf 'Update: titsdic update\nUninstall: titsdic-ptt uninstall\n'
 printf 'Status: systemctl --user status titsdic.service\nLogs: journalctl --user -u titsdic.service -f\n'
 printf 'Stop: systemctl --user stop titsdic.service\nDisable autostart: systemctl --user disable --now titsdic.service\n'
 printf 'Configure your own desktop shortcuts; none were installed.\n'
